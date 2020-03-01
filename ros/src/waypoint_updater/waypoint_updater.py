@@ -3,6 +3,8 @@
 import rospy
 from geometry_msgs.msg import PoseStamped
 from styx_msgs.msg import Lane, Waypoint
+from scipy.spatial import KDTree
+import numpy as np
 
 import math
 
@@ -28,25 +30,86 @@ class WaypointUpdater(object):
     def __init__(self):
         rospy.init_node('waypoint_updater')
 
-        rospy.Subscriber('/current_pose', PoseStamped, self.pose_cb)
-        rospy.Subscriber('/base_waypoints', Lane, self.waypoints_cb)
-
+        # Subscribers
+        self.current_pose_sub = rospy.Subscriber('/current_pose', PoseStamped, self.pose_cb)
+        self.base_waypoints_sub = rospy.Subscriber('/base_waypoints', Lane, self.base_waypoints_cb)
         # TODO: Add a subscriber for /traffic_waypoint and /obstacle_waypoint below
 
-
+        # Publishers
         self.final_waypoints_pub = rospy.Publisher('final_waypoints', Lane, queue_size=1)
 
-        # TODO: Add other member variables you need below
+        # Current ego vehicle pose class variable
+        self.current_pose = None
 
-        rospy.spin()
+        # Base waypoints variables
+        self.base_waypoints_init = False
+        self.base_waypoints = None
+        self.base_waypoints_2d = None
+        self.base_waypoints_tree = None
 
-    def pose_cb(self, msg):
-        # TODO: Implement
-        pass
+        self.step()
 
-    def waypoints_cb(self, waypoints):
-        # TODO: Implement
-        pass
+    '''
+    This method updates the current ego vehicle pose
+    '''
+    def pose_cb(self, data):
+        self.current_pose = data
+        #rospy.loginfo('Current pose updated: x = %s , y = %s', self.current_pose.pose.position.x, self.current_pose.pose.position.y)
+
+    '''
+    This method stores the base waypoints in the class variables
+    '''
+    def base_waypoints_cb(self, input_waypoints):
+        if not self.base_waypoints_init:
+            self.base_waypoints = input_waypoints
+            self.base_waypoints_2d = [[wp.pose.pose.position.x, wp.pose.pose.position.y] for wp in input_waypoints.waypoints]
+            self.base_waypoints_tree = KDTree(self.base_waypoints_2d)
+            self.base_waypoints_init = True
+            #rospy.loginfo('Base waypoints initialized.')
+
+    '''
+    The step method updates the final waypoints based on the current ego vehicle pose
+    '''
+    def step(self):
+        rate = rospy.Rate(30)
+        while not rospy.is_shutdown():
+            if self.current_pose and self.base_waypoints_init:
+                closest_waypoint_idx = self.get_closest_waypoint_idx()
+                self.publish_waypoints(closest_waypoint_idx)
+            rate.sleep()
+
+    '''
+    This method finds the closest waypoint to the current ego vehicle pose
+    '''
+    def get_closest_waypoint_idx(self):
+        current_pose_x = self.current_pose.pose.position.x
+        current_pose_y = self.current_pose.pose.position.y
+        closest_idx = self.base_waypoints_tree.query([current_pose_x, current_pose_y], 1)[1]
+
+        # Checking if closest waypoint is ahead or behind ego vehicle pose
+        closest_wp = self.base_waypoints_2d[closest_idx]
+        previous_wp = self.base_waypoints_2d[closest_idx-1]
+        closest_wp_vec = np.array(closest_wp)
+        previous_wp_vec = np.array(previous_wp)
+        current_pose_vec = np.array([current_pose_x, current_pose_y])
+
+        dot_product_result = np.dot(closest_wp_vec - previous_wp_vec, current_pose_vec - closest_wp_vec)
+
+        # Choose next waypoint if the current one is behind ego vehicle pose
+        if dot_product_result > 0:
+            closest_idx = (closest_idx + 1)%len(self.base_waypoints_2d)
+
+        #rospy.loginfo('Closest waypoint idx = %s', closest_idx)
+        return closest_idx
+
+    '''
+    This method publishes a number of waypoints (=LOOKAHEAD_WPS) next to the ego vehicle pose
+    '''
+    def publish_waypoints(self, closest_idx):
+        final_waypoints = Lane()
+        final_waypoints.header = self.base_waypoints.header
+        final_waypoints.waypoints = self.base_waypoints.waypoints[closest_idx:closest_idx+LOOKAHEAD_WPS]
+        self.final_waypoints_pub.publish(final_waypoints)
 
     def traffic_cb(self, msg):
         # TODO: Callback for /traffic_waypoint message. Implement
